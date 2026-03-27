@@ -1,0 +1,117 @@
+# credential-downscope configuration
+# Copy this file to .claude/downscoping.yaml in your project root.
+#
+# SECURITY NOTE: Prepending TOKEN=value before a command makes the token
+# visible in process listings (ps aux). For high-security environments,
+# consider using a credential helper or secrets manager that can inject
+# tokens via a file descriptor or secure IPC instead of env var prepending.
+#
+# Token resolution order:
+#   1. env_var value (e.g. GITHUB_TOKEN_READONLY from process environment)
+#   2. Falls back to the inject_as variable (e.g. GITHUB_TOKEN) if env_var is unset
+#   3. No injection if neither is set (command runs as-is)
+
+version: 1
+
+services:
+  # ── GitHub CLI (gh) ──────────────────────────────────────────────────────
+  gh:
+    token_slots:
+      readonly:
+        env_var: GITHUB_TOKEN_READONLY     # resolved from process env
+        inject_as: GITHUB_TOKEN            # injected into subprocess env
+      org-write:
+        env_var: GITHUB_TOKEN_ORG_WRITE
+        inject_as: GITHUB_TOKEN
+    default_slot: readonly
+    rules:
+      - name: "writes need elevated token"
+        match:
+          # regex matched against the full command string after the binary name
+          args_pattern: "pr (create|merge|edit)|issue (create|edit)|push|release create"
+        slot: org-write
+      - name: "specific org always elevated"
+        match:
+          args_pattern: "--repo myorg/"
+        slot: org-write
+
+  # ── Google Cloud SDK (gcloud) ─────────────────────────────────────────────
+  gcloud:
+    token_slots:
+      viewer:
+        env_var: GCLOUD_TOKEN_VIEWER
+        inject_as: CLOUDSDK_AUTH_ACCESS_TOKEN
+      editor:
+        env_var: GCLOUD_TOKEN_EDITOR
+        inject_as: CLOUDSDK_AUTH_ACCESS_TOKEN
+    default_slot: viewer
+    rules:
+      - name: "mutating operations need editor"
+        match:
+          args_pattern: "deploy|delete|create|update|rollout"
+        slot: editor
+
+  # ── AWS CLI ───────────────────────────────────────────────────────────────
+  aws:
+    token_slots:
+      readonly:
+        env_var: AWS_ACCESS_KEY_ID_READONLY
+        inject_as: AWS_ACCESS_KEY_ID
+        # Note: for AWS you likely also need AWS_SECRET_ACCESS_KEY and
+        # AWS_SESSION_TOKEN. Add them as additional inject pairs if needed
+        # (extend the schema as your use case requires).
+      admin:
+        env_var: AWS_ACCESS_KEY_ID_ADMIN
+        inject_as: AWS_ACCESS_KEY_ID
+    default_slot: readonly
+    rules:
+      - name: "mutating AWS operations"
+        match:
+          args_pattern: "create|delete|put|update|deploy|attach|detach|associate|terminate"
+        slot: admin
+
+  # ── kubectl ───────────────────────────────────────────────────────────────
+  kubectl:
+    token_slots:
+      viewer:
+        env_var: KUBE_TOKEN_VIEWER
+        inject_as: KUBE_TOKEN
+      deployer:
+        env_var: KUBE_TOKEN_DEPLOYER
+        inject_as: KUBE_TOKEN
+    default_slot: viewer
+    rules:
+      - name: "cluster mutations need deployer"
+        match:
+          args_pattern: "apply|delete|scale|rollout|patch|create|replace"
+        slot: deployer
+
+  # ── MCP server token scoping (Mode 2) ─────────────────────────────────────
+  # Wraps an upstream MCP server with per-call token injection.
+  # The proxy is registered in .mcp.json as "credential-downscope-proxy".
+  mcp:
+    server: github-pr-issue-analyser      # matches mcpServers key in .mcp.json
+    token_slots:
+      readonly:
+        env_var: GITHUB_TOKEN_READONLY
+        inject_as: GITHUB_TOKEN
+      org-write:
+        env_var: GITHUB_TOKEN_ORG_WRITE
+        inject_as: GITHUB_TOKEN
+    default_slot: readonly
+    rules:
+      - name: "write MCP tools need elevated token"
+        match:
+          tools:
+            - create_issue
+            - create_pr
+            - merge_pr
+            - update_pr_description
+            - update_issue
+            - create_tag
+            - create_release
+            - add_pr_comments
+            - add_inline_pr_comment
+            - update_reviews
+            - update_assignees
+        slot: org-write

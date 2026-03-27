@@ -1,0 +1,9 @@
+{
+  "name": "credential-downscope",
+  "version": "0.1.0",
+  "description": "Least-privilege credential injection for CLI tools and MCP servers. Intercepts Bash tool calls and MCP tool calls, swapping in the least-privileged auth token for each operation based on .claude/downscoping.yaml config.",
+  "author": "kbroughton",
+  "repository": "https://github.com/kbroughton/downscoping-mcp",
+  "hooks": "hooks/",
+  "claude_code_min_version": "1.0.0"
+}
