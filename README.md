@@ -23,6 +23,16 @@ A `PreToolUse` hook intercepts every `Bash` tool call. If the command starts wit
 **Mode 2 — MCP proxy**
 An MCP proxy server wraps an upstream MCP server. Before forwarding each tool call, it injects the scoped token for that specific tool into the subprocess environment. Read-only tools get a read-only token; write tools require an elevated token.
 
+## Why this approach?
+
+The obvious alternative is creating dedicated low-privilege IAM roles or service accounts for AI use — one per team, per environment. This runs into hard limits fast.
+
+A typical `~/.aws/config` already has 60+ profiles covering different accounts and roles. Doubling that with AI-specific downscoped counterparts means 120+ profiles, ongoing IaC maintenance, and per-engineer configuration in `.claude/settings.local.json` to wire up the right profile. AWS has a default IAM role quota of 1,000 per account (higher limits require a quota increase request), and each new role is another thing to audit, rotate, and keep in sync with the original.
+
+This tool takes a different approach: downscope dynamically at call time, without touching IAM. It works analogously to `aws sts assume-role --policy-arns`, which restricts the effective permissions of an assumed role to the intersection of the role's policies and the supplied policy ARNs. Here, the intersection is defined in a YAML file checked into your project rather than an IAM policy document — but the semantics are the same. Your existing credentials are used; their effective capabilities are narrowed per operation according to the rules you define.
+
+One important property is preserved: **this tool can only reduce privileges, never increase them.** It sets guardrails to keep AI tool use safe and conformant with company policy, without requiring any changes to your IAM setup.
+
 ## Quick Start
 
 ### 1. Install
