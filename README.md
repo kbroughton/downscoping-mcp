@@ -1,6 +1,13 @@
 # downscoping-mcp
 
-Least-privilege credential injection for Claude Code. Intercepts Bash and MCP tool calls before they execute, swapping in the minimum-privilege token required for each operation based on a declarative YAML policy.
+Downgrade user credential privileges to a configurable subset for use by AI tools. A user should already be given a subset of permissions for daily work which maps to services in particular GCP projects or AWS accounts. Downscoping refers to further restricting the actions to conform with company standards.
+
+Permission grants are typically `<Action allowed> on <Resource>`. The downscoping affects the `<Action allowed>` by reducing capabilities, for example from read/write to read-only.
+
+**Examples**
+- Allow read but not write to Google Drive documents
+- Allow GitHub read for PRs but not merging or approving
+- Allow reading logs but not deploying to a project in GCP
 
 ## Problem
 
