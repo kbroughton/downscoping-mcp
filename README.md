@@ -11,7 +11,7 @@ Permission grants are typically `<Action allowed> on <Resource>`. The downscopin
 
 ## Problem
 
-Claude Code runs with whatever credentials are present in your environment. A model that can read files can also call `gh repo delete`, `gcloud projects delete`, or `aws iam delete-user` — using the same token. A single jailbreak, prompt injection, or confused-deputy attack is enough to cause damage.
+Claude Code runs with whatever credentials are present in your environment. A model that can read files can also call `gh repo delete`, `gcloud projects delete`, or `aws iam delete-user` — using the same token. A single jailbreak, prompt injection, or confused-deputy attack is enough to cause damage. So are accidental errors — Claude pushing directly to a release branch can trigger a deploy pipeline if branch protections or GitHub Actions are not correctly configured.
 
 ## Solution
 
