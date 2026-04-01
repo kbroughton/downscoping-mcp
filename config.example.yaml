@@ -1,42 +1,140 @@
 # credential-downscope configuration
 # Copy this file to .claude/downscoping.yaml in your project root.
 #
+# DOWNSCOPE MODES
+# ───────────────
+# Each service specifies a downscope_mode that determines how credentials
+# are restricted at call time:
+#
+#   sts_policy   — (AWS) calls sts:AssumeRole or sts:GetFederationToken with an
+#                  inline policy that is the intersection of the existing role and
+#                  the supplied policy.  No new IAM roles required.
+#                  Analogous to: aws sts assume-role --policy-arns
+#
+#   credential_access_boundary — (GCP) exchanges the ambient access token via
+#                  sts.googleapis.com for a downscoped token restricted to
+#                  specific resources and permissions.  Supported for GCS only.
+#                  Ref: google.auth.downscoped
+#
+#   oauth_scope  — (GCP fallback) uses generateAccessToken with narrower OAuth
+#                  scopes.  API-level granularity only (not resource-level).
+#
+#   token_slot   — Static fallback for services without a dynamic API.  You
+#                  pre-provision narrowly-scoped tokens, export them as env vars,
+#                  and this plugin selects the right one per operation.
+#                  Required for: GitHub (no dynamic downscoping available)
+#
+# RULE ACTIONS
+# ────────────
+# Each rule specifies an action:
+#
+#   allow  — inject the scoped token for the matched slot (default)
+#   deny   — block the command; Claude is told it is not permitted for AI use
+#   review — block the command; Claude is told to ask the user to run it manually
+#
+# TOKEN RESOLUTION ORDER (token_slot mode)
+# ─────────────────────────────────────────
+#   1. env_var value (e.g. GITHUB_TOKEN_READONLY from process environment)
+#   2. Falls back to inject_as variable (e.g. GITHUB_TOKEN) if env_var is unset
+#   3. No injection if neither is set (command runs as-is)
+#
 # SECURITY NOTE: Prepending TOKEN=value before a command makes the token
 # visible in process listings (ps aux). For high-security environments,
-# consider using a credential helper or secrets manager that can inject
-# tokens via a file descriptor or secure IPC instead of env var prepending.
-#
-# Token resolution order:
-#   1. env_var value (e.g. GITHUB_TOKEN_READONLY from process environment)
-#   2. Falls back to the inject_as variable (e.g. GITHUB_TOKEN) if env_var is unset
-#   3. No injection if neither is set (command runs as-is)
+# consider using a credential helper or secrets manager.
 
 version: 1
 
 services:
   # ── GitHub CLI (gh) ──────────────────────────────────────────────────────
+  # Dynamic downscoping is not available for GitHub. Fine-grained PATs are the
+  # recommended approach — create one token per privilege level.
+  # See docs/GITHUB_DOWNSCOPING.md
   gh:
+    downscope_mode: token_slot
     token_slots:
       readonly:
-        env_var: GITHUB_TOKEN_READONLY     # resolved from process env
-        inject_as: GITHUB_TOKEN            # injected into subprocess env
+        env_var: GITHUB_TOKEN_READONLY     # fine-grained PAT: contents:read, issues:read
+        inject_as: GITHUB_TOKEN
       org-write:
-        env_var: GITHUB_TOKEN_ORG_WRITE
+        env_var: GITHUB_TOKEN_ORG_WRITE    # fine-grained PAT: issues:write, pull_requests:write
         inject_as: GITHUB_TOKEN
     default_slot: readonly
     rules:
-      - name: "writes need elevated token"
+      - name: "PR/issue writes and push need elevated token"
         match:
-          # regex matched against the full command string after the binary name
           args_pattern: "pr (create|merge|edit)|issue (create|edit)|push|release create"
+        action: allow
         slot: org-write
-      - name: "specific org always elevated"
+      - name: "repo deletion is never permitted for AI"
         match:
-          args_pattern: "--repo myorg/"
-        slot: org-write
+          args_pattern: "repo delete|repo rename"
+        action: deny
+      - name: "merging to protected branches requires review"
+        match:
+          args_pattern: "pr merge"
+        action: review
+
+  # ── AWS CLI ───────────────────────────────────────────────────────────────
+  # Preferred: sts_policy mode derives a restricted session from your existing
+  # credentials at call time using sts:GetFederationToken with an inline policy.
+  # No new IAM roles or additional credentials needed.
+  # See docs/AWS_DOWNSCOPING.md
+  aws:
+    downscope_mode: sts_policy
+    # The inline_policy defined here is passed to sts:GetFederationToken.
+    # Effective permissions = intersection(caller's policies, inline_policy).
+    inline_policy:
+      Version: "2012-10-17"
+      Statement:
+        - Effect: Allow
+          Action:
+            - "s3:GetObject"
+            - "s3:ListBucket"
+            - "s3:ListAllMyBuckets"
+            - "ec2:Describe*"
+            - "iam:Get*"
+            - "iam:List*"
+            - "cloudwatch:Get*"
+            - "cloudwatch:List*"
+            - "logs:Describe*"
+            - "logs:Get*"
+            - "logs:FilterLogEvents"
+          Resource: "*"
+    # Fallback token_slots if sts_policy is not configured or fails:
+    token_slots:
+      readonly:
+        env_var: AWS_ACCESS_KEY_ID_READONLY
+        inject_as: AWS_ACCESS_KEY_ID
+      admin:
+        env_var: AWS_ACCESS_KEY_ID_ADMIN
+        inject_as: AWS_ACCESS_KEY_ID
+    default_slot: readonly
+    rules:
+      - name: "mutating S3 operations require review"
+        match:
+          args_pattern: "s3 (cp|mv|rm|sync|rb|mb) .*s3://"
+        action: review
+      - name: "IAM mutations are denied"
+        match:
+          args_pattern: "iam (create|delete|put|attach|detach|update|add|remove|tag|untag)"
+        action: deny
+      - name: "destructive EC2/RDS operations require review"
+        match:
+          args_pattern: "ec2 (terminate|stop|delete|modify)|rds (delete|stop|modify)"
+        action: review
 
   # ── Google Cloud SDK (gcloud) ─────────────────────────────────────────────
+  # Preferred: credential_access_boundary for GCS operations.
+  # Fallback: oauth_scope for other services (API-level granularity only).
+  # Note: CAB is GCS-only — other services fall back to oauth_scope or token_slot.
+  # See docs/GCP_DOWNSCOPING.md
   gcloud:
+    downscope_mode: credential_access_boundary  # effective for GCS; falls back to oauth_scope
+    access_boundary:
+      - available_resource: "//storage.googleapis.com/projects/_/buckets/*"
+        available_permissions:
+          - "inRole:roles/storage.objectViewer"
+    # Fallback token_slots:
     token_slots:
       viewer:
         env_var: GCLOUD_TOKEN_VIEWER
@@ -46,32 +144,25 @@ services:
         inject_as: CLOUDSDK_AUTH_ACCESS_TOKEN
     default_slot: viewer
     rules:
-      - name: "mutating operations need editor"
+      - name: "GCS writes require review"
         match:
-          args_pattern: "deploy|delete|create|update|rollout"
-        slot: editor
-
-  # ── AWS CLI ───────────────────────────────────────────────────────────────
-  aws:
-    token_slots:
-      readonly:
-        env_var: AWS_ACCESS_KEY_ID_READONLY
-        inject_as: AWS_ACCESS_KEY_ID
-        # Note: for AWS you likely also need AWS_SECRET_ACCESS_KEY and
-        # AWS_SESSION_TOKEN. Add them as additional inject pairs if needed
-        # (extend the schema as your use case requires).
-      admin:
-        env_var: AWS_ACCESS_KEY_ID_ADMIN
-        inject_as: AWS_ACCESS_KEY_ID
-    default_slot: readonly
-    rules:
-      - name: "mutating AWS operations"
+          args_pattern: "storage (cp|mv|rm|rsync) .*gs://|storage buckets (create|delete)"
+        action: review
+      - name: "deploys and deletes are denied"
         match:
-          args_pattern: "create|delete|put|update|deploy|attach|detach|associate|terminate"
-        slot: admin
+          args_pattern: "run deploy|functions deploy|app deploy|projects delete|sql instances delete"
+        action: deny
+      - name: "mutating operations require review"
+        match:
+          args_pattern: "(create|delete|update|patch|rollout|apply) "
+        action: review
 
   # ── kubectl ───────────────────────────────────────────────────────────────
+  # token_slot mode for vanilla RBAC clusters.
+  # EKS and GKE clusters can use the backing cloud provider's dynamic downscoping —
+  # see docs/KUBECTL_DOWNSCOPING.md for details.
   kubectl:
+    downscope_mode: token_slot
     token_slots:
       viewer:
         env_var: KUBE_TOKEN_VIEWER
@@ -81,16 +172,26 @@ services:
         inject_as: KUBE_TOKEN
     default_slot: viewer
     rules:
-      - name: "cluster mutations need deployer"
+      - name: "cluster mutations require review"
         match:
-          args_pattern: "apply|delete|scale|rollout|patch|create|replace"
-        slot: deployer
+          args_pattern: "apply|scale|rollout|patch|replace|delete (deployment|service|pod|namespace)"
+        action: review
+      - name: "RBAC mutations are denied"
+        match:
+          args_pattern: "(create|delete|edit) (clusterrole|clusterrolebinding|role|rolebinding)"
+        action: deny
+      - name: "exec into pods requires review"
+        match:
+          args_pattern: "exec "
+        action: review
 
-  # ── MCP server token scoping (Mode 2) ─────────────────────────────────────
-  # Wraps an upstream MCP server with per-call token injection.
-  # The proxy is registered in .mcp.json as "credential-downscope-proxy".
+  # ── MCP server token scoping ───────────────────────────────────────────────
+  # Wraps an upstream MCP server with per-call token injection (Mode 2).
+  # Registered in .mcp.json as "credential-downscope-proxy".
+  # See docs/GITHUB_DOWNSCOPING.md for GitHub MCP details.
   mcp:
-    server: github-pr-issue-analyser      # matches mcpServers key in .mcp.json
+    downscope_mode: token_slot
+    server: github-pr-issue-analyser
     token_slots:
       readonly:
         env_var: GITHUB_TOKEN_READONLY
@@ -114,4 +215,10 @@ services:
             - add_inline_pr_comment
             - update_reviews
             - update_assignees
+        action: allow
         slot: org-write
+      - name: "merging PRs via MCP requires review"
+        match:
+          tools:
+            - merge_pr
+        action: review
